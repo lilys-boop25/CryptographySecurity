@@ -18,10 +18,6 @@ HEX_CIPHERTEXTS: List[str] = [
     "32510ba9babebbbefd001547a810e67149caee11d945cd7fc81a05e9f85aac650e9052ba6a8cd8257bf14d13e6f0a803b54fde9e77472dbff89d71b57bddef121336cb85ccb8f3315f4b52e301d16e9f52f904",
 ]
 
-CRIB: bytes = (
-    b"The secret message is: When using a stream cipher, never use the key more than once"
-)
-
 ALPHA_SET = set(range(ord("A"), ord("Z") + 1)) | set(range(ord("a"), ord("z") + 1))
 PRINTABLE_SET = set(range(32, 127))
 
@@ -67,14 +63,63 @@ def derive_key_by_space_heuristic(
     return key
 
 
-def apply_crib_to_cipher(
-    key: List[Optional[int]], ciphertext: bytes, crib: bytes, start_offset: int = 0
+def refine_key_by_printability(
+    ciphertexts: List[bytes], key: List[Optional[int]], min_printable_ratio: float = 0.75
 ) -> None:
-    for idx, crib_byte in enumerate(crib):
-        position = start_offset + idx
-        if position >= len(ciphertext):
-            break
-        key[position] = ciphertext[position] ^ crib_byte
+    """For positions where the key is unknown, choose the key byte that
+    maximizes printable ASCII across all ciphertexts. This does not use any
+    known plaintext. Keys failing the printable ratio threshold are left unknown.
+    """
+    max_len = max(len(c) for c in ciphertexts)
+    for position in range(max_len):
+        if key[position] is not None:
+            continue
+        # Try all 256 key byte candidates and pick the one with best score
+        best_score = -1
+        best_key_byte: Optional[int] = None
+        # Limit scoring set to speed up: evaluate across the first K ciphertexts that have this position
+        # but with our input sizes, full scan is fine
+        for candidate in range(256):
+            printable_hits = 0
+            letter_hits = 0
+            space_hits = 0
+            total = 0
+            for c in ciphertexts:
+                if position >= len(c):
+                    continue
+                total += 1
+                ptb = c[position] ^ candidate
+                if ptb in PRINTABLE_SET:
+                    printable_hits += 1
+                    if ptb == 0x20:
+                        space_hits += 1
+                    elif ptb in ALPHA_SET:
+                        letter_hits += 1
+            if total == 0:
+                continue
+            printable_ratio = printable_hits / float(total)
+            # Weighted score: prioritize printable, then letters, then spaces
+            score = (
+                5.0 * printable_ratio +
+                1.5 * (letter_hits / float(total)) +
+                1.0 * (space_hits / float(total))
+            )
+            if score > best_score:
+                best_score = score
+                best_key_byte = candidate
+        # Apply candidate only if it yields enough printable characters
+        if best_key_byte is not None:
+            # Recompute printable ratio for the best candidate to enforce threshold
+            total = 0
+            printable_hits = 0
+            for c in ciphertexts:
+                if position >= len(c):
+                    continue
+                total += 1
+                if (c[position] ^ best_key_byte) in PRINTABLE_SET:
+                    printable_hits += 1
+            if total > 0 and (printable_hits / float(total)) >= min_printable_ratio:
+                key[position] = best_key_byte
 
 
 def decrypt_with_key(ciphertext: bytes, key: List[Optional[int]]) -> str:
@@ -95,8 +140,8 @@ def main() -> None:
     space_evidence = compute_space_evidence(ciphertexts)
     key = derive_key_by_space_heuristic(ciphertexts, space_evidence, include_last_in_seed=False)
 
-    # Known canonical crib aligns at offset 0 for this dataset
-    apply_crib_to_cipher(key, target, CRIB, start_offset=0)
+    # Refine unknown key positions purely via printability across all ciphertexts
+    refine_key_by_printability(ciphertexts, key, min_printable_ratio=0.8)
 
     # Decrypt target and print/write
     plaintext = decrypt_with_key(target, key)
