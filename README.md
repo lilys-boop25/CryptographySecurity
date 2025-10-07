@@ -1,8 +1,10 @@
-# Many-Time Pad Solver (No-Crib Heuristic)
+# Many-Time Pad Solver
 
 This solver recovers the plaintext of the last ciphertext when the same one-time pad keystream is mistakenly reused across multiple messages.
 
-## Approach (≤300 words)
+## Approach
+1. Root flaw: reusing the key in OTP/stream ciphers.
+If the same key is used more than once, XORing two ciphertexts cancels the key and yields P1 ⊕ P2. That is the fundamental vulnerability this approach exploits.
 We exploit that XORing two ciphertexts produced with the same keystream cancels the keystream and yields the XOR of the two plaintexts. When one plaintext contains a space (0x20) and the other an ASCII letter, the XOR is typically alphabetic. Counting these events across all pairs gives “space evidence” per position for each ciphertext. Where evidence is strong, we infer the keystream byte as C ⊕ 0x20.
 
 For positions with unknown keystream, we avoid any crib and instead search over all 256 key byte candidates and score them by how well the resulting plaintext bytes look like English across all ciphertexts. The score emphasizes printable ASCII, letters, spaces, and common punctuation, penalizes rare punctuation, and incorporates the space-evidence as a soft prior. We iterate this refinement a few passes until convergence. This produces high-quality plaintexts for ciphertexts #1–#10 and the target.
