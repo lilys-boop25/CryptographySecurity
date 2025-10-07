@@ -19,7 +19,10 @@ HEX_CIPHERTEXTS: List[str] = [
 ]
 
 ALPHA_SET = set(range(ord("A"), ord("Z") + 1)) | set(range(ord("a"), ord("z") + 1))
+DIGIT_SET = set(range(ord('0'), ord('9') + 1))
 PRINTABLE_SET = set(range(32, 127))
+COMMON_PUNCT = set(map(ord, list(" ,.;:'\"!?()-/[]{}&_")))
+RARE_PUNCT = set(map(ord, list("~`^|\\<>")))
 
 
 def bytes_from_hex_list(hex_list: Iterable[str]) -> List[bytes]:
@@ -64,62 +67,95 @@ def derive_key_by_space_heuristic(
 
 
 def refine_key_by_printability(
-    ciphertexts: List[bytes], key: List[Optional[int]], min_printable_ratio: float = 0.75
+    ciphertexts: List[bytes],
+    key: List[Optional[int]],
+    space_evidence: List[List[int]],
+    evidence_threshold: int,
+    min_printable_ratio: float = 0.8,
+    max_passes: int = 2,
 ) -> None:
     """For positions where the key is unknown, choose the key byte that
     maximizes printable ASCII across all ciphertexts. This does not use any
     known plaintext. Keys failing the printable ratio threshold are left unknown.
     """
     max_len = max(len(c) for c in ciphertexts)
-    for position in range(max_len):
-        if key[position] is not None:
-            continue
-        # Try all 256 key byte candidates and pick the one with best score
-        best_score = -1
-        best_key_byte: Optional[int] = None
-        # Limit scoring set to speed up: evaluate across the first K ciphertexts that have this position
-        # but with our input sizes, full scan is fine
-        for candidate in range(256):
-            printable_hits = 0
-            letter_hits = 0
-            space_hits = 0
-            total = 0
-            for c in ciphertexts:
-                if position >= len(c):
-                    continue
-                total += 1
-                ptb = c[position] ^ candidate
-                if ptb in PRINTABLE_SET:
-                    printable_hits += 1
-                    if ptb == 0x20:
-                        space_hits += 1
-                    elif ptb in ALPHA_SET:
-                        letter_hits += 1
-            if total == 0:
+    for _ in range(max_passes):
+        changed = False
+        for position in range(max_len):
+            if key[position] is not None:
                 continue
-            printable_ratio = printable_hits / float(total)
-            # Weighted score: prioritize printable, then letters, then spaces
-            score = (
-                5.0 * printable_ratio +
-                1.5 * (letter_hits / float(total)) +
-                1.0 * (space_hits / float(total))
-            )
-            if score > best_score:
-                best_score = score
-                best_key_byte = candidate
-        # Apply candidate only if it yields enough printable characters
-        if best_key_byte is not None:
-            # Recompute printable ratio for the best candidate to enforce threshold
-            total = 0
-            printable_hits = 0
-            for c in ciphertexts:
-                if position >= len(c):
+            best_score = -1e9
+            best_key_byte: Optional[int] = None
+            # Evaluate all candidates
+            for candidate in range(256):
+                printable_hits = 0
+                letter_hits = 0
+                digit_hits = 0
+                space_hits = 0
+                common_punct_hits = 0
+                rare_punct_hits = 0
+                total = 0
+                evidence_bonus = 0.0
+                for i, c in enumerate(ciphertexts):
+                    if position >= len(c):
+                        continue
+                    total += 1
+                    ptb = c[position] ^ candidate
+                    # space evidence shaping
+                    if space_evidence[i][position] >= evidence_threshold:
+                        if ptb == 0x20:
+                            evidence_bonus += 0.35
+                        else:
+                            evidence_bonus -= 0.20
+                    if ptb in PRINTABLE_SET:
+                        printable_hits += 1
+                        if ptb in ALPHA_SET:
+                            letter_hits += 1
+                        elif ptb in DIGIT_SET:
+                            digit_hits += 1
+                        elif ptb == 0x20:
+                            space_hits += 1
+                        elif ptb in COMMON_PUNCT:
+                            common_punct_hits += 1
+                        elif ptb in RARE_PUNCT:
+                            rare_punct_hits += 1
+                if total == 0:
                     continue
-                total += 1
-                if (c[position] ^ best_key_byte) in PRINTABLE_SET:
-                    printable_hits += 1
-            if total > 0 and (printable_hits / float(total)) >= min_printable_ratio:
-                key[position] = best_key_byte
+                printable_ratio = printable_hits / float(total)
+                letter_ratio = letter_hits / float(total)
+                digit_ratio = digit_hits / float(total)
+                space_ratio = space_hits / float(total)
+                common_punct_ratio = common_punct_hits / float(total)
+                rare_punct_ratio = rare_punct_hits / float(total)
+
+                score = (
+                    7.0 * printable_ratio +
+                    2.2 * letter_ratio +
+                    0.8 * space_ratio +
+                    0.6 * digit_ratio +
+                    0.5 * common_punct_ratio -
+                    1.2 * rare_punct_ratio +
+                    evidence_bonus
+                )
+                if score > best_score:
+                    best_score = score
+                    best_key_byte = candidate
+
+            if best_key_byte is not None:
+                # Enforce printable threshold for the selected candidate
+                total = 0
+                printable_hits = 0
+                for c in ciphertexts:
+                    if position >= len(c):
+                        continue
+                    total += 1
+                    if (c[position] ^ best_key_byte) in PRINTABLE_SET:
+                        printable_hits += 1
+                if total > 0 and (printable_hits / float(total)) >= min_printable_ratio:
+                    key[position] = best_key_byte
+                    changed = True
+        if not changed:
+            break
 
 
 def decrypt_with_key(ciphertext: bytes, key: List[Optional[int]]) -> str:
@@ -141,7 +177,10 @@ def main() -> None:
     key = derive_key_by_space_heuristic(ciphertexts, space_evidence, include_last_in_seed=False)
 
     # Refine unknown key positions purely via printability across all ciphertexts
-    refine_key_by_printability(ciphertexts, key, min_printable_ratio=0.8)
+    evidence_threshold = max(2, (len(ciphertexts) - 1) // 2)
+    refine_key_by_printability(
+        ciphertexts, key, space_evidence, evidence_threshold, min_printable_ratio=0.85, max_passes=3
+    )
 
     # Decrypt and print plaintexts for ciphertexts #1..#10
     for idx, c in enumerate(ciphertexts[:-1], start=1):
