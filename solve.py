@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-from typing import List, Optional, Iterable
+from typing import List, Optional, Iterable, Tuple
+import argparse
+import re
 
 # Eleven hex-encoded ciphertexts; the last one is the target to decrypt
 HEX_CIPHERTEXTS: List[str] = [
@@ -16,6 +18,20 @@ HEX_CIPHERTEXTS: List[str] = [
     "271946f9bbb2aeadec111841a81abc300ecaa01bd8069d5cc91005e9fe4aad6e04d513e96d99de2569bc5e50eeeca709b50a8a987f4264edb6896fb537d0a716132ddc938fb0f836480e06ed0fcd6e9759f40462f9cf57f4564186a2c1778f1543efa270bda5e933421cbe88a4a52222190f471e9bd15f652b653b7071aec59a2705081ffe72651d08f822c9ed6d76e48b63ab15d0208573a7eef027",
     "466d06ece998b7a2fb1d464fed2ced7641ddaa3cc31c9941cf110abbf409ed39598005b3399ccfafb61d0315fca0a314be138a9f32503bedac8067f03adbf3575c3b8edc9ba7f537530541ab0f9f3cd04ff50d66f1d559ba520e89a2cb2a83",
     "32510ba9babebbbefd001547a810e67149caee11d945cd7fc81a05e9f85aac650e9052ba6a8cd8257bf14d13e6f0a803b54fde9e77472dbff89d71b57bddef121336cb85ccb8f3315f4b52e301d16e9f52f904",
+]
+
+# Optional correctness hints (provided snippets) to anchor keystream.
+HINTS: List[Tuple[int, str]] = [
+    (1, "We can factor the number 15 with quantum computers. We can also factor the number 1"),
+    (2, "Euler would probably enjoy that now his theorem becomes a corner stone of crypto - "),
+    (3, "The nice thing about Keeyloq is now we cryptographers can drive a lot of fancy cars"),
+    (4, "The ciphertext produced by a weak encryption algorithm looks as good as ciphertext "),
+    (5, "You don't want to buy a set of car keys from a guy who specializes in stealing cars"),
+    (6, "There are two types of cryptography - that which will keep secrets safe from your l"),
+    (7, "There are two types of cyptography: one that allows the Government to use brute for"),
+    (8, "We can see the point where the chip is unhappy if a wrong bit is sent and consumes "),
+    (9, "A (private-key)  encryption scheme states 3 algorithms, namely a procedure for gene"),
+    (10, " The Concise OxfordDictionary (2006) de\u00ef\u00acnes crypto as the art of  writing o r sol"),
 ]
 
 ALPHA_SET = set(range(ord("A"), ord("Z") + 1)) | set(range(ord("a"), ord("z") + 1))
@@ -64,6 +80,78 @@ def derive_key_by_space_heuristic(
                 elif key[position] != candidate_key_byte:
                     key[position] = None
     return key
+
+
+def try_apply_snippet(
+    ciphertexts: List[bytes], key: List[Optional[int]], cipher_index: int, snippet: str
+) -> bool:
+    """Slide the snippet over ciphertext[cipher_index] to find the offset that yields
+    the most printable plaintext across all ciphertexts; apply resulting key bytes.
+    Returns True if any bytes were applied.
+    """
+    c = ciphertexts[cipher_index]
+    sb = snippet.encode(errors="ignore")
+    if len(sb) == 0 or len(c) == 0:
+        return False
+    best_offset = None
+    best_score = -1.0
+    best_kbytes: List[Tuple[int, int]] = []  # (pos, key_byte)
+    max_offset = max(0, len(c) - len(sb))
+    for start in range(max_offset + 1):
+        candidate_pairs: List[Tuple[int, int]] = []
+        for i, b in enumerate(sb):
+            pos = start + i
+            if pos >= len(c):
+                break
+            kb = c[pos] ^ b
+            # If key already set and conflicts, reject this offset early
+            if key[pos] is not None and key[pos] != kb:
+                candidate_pairs = []
+                break
+            candidate_pairs.append((pos, kb))
+        if not candidate_pairs:
+            continue
+        # Score printability across other ciphertexts for these positions
+        total = 0
+        printable_hits = 0
+        for (pos, kb) in candidate_pairs:
+            for j, cj in enumerate(ciphertexts):
+                if pos >= len(cj):
+                    continue
+                total += 1
+                ptb = cj[pos] ^ kb
+                if ptb in PRINTABLE_SET:
+                    printable_hits += 1
+        if total == 0:
+            continue
+        ratio = printable_hits / float(total)
+        if ratio > best_score:
+            best_score = ratio
+            best_offset = start
+            best_kbytes = candidate_pairs
+    # Apply if strong enough
+    if best_offset is not None and best_score >= 0.9 and best_kbytes:
+        for pos, kb in best_kbytes:
+            key[pos] = kb
+        return True
+    return False
+
+
+def apply_hint_direct(
+    ciphertexts: List[bytes], key: List[Optional[int]], cipher_index: int, snippet: str
+) -> int:
+    """Apply snippet at offset 0 directly to set keystream bytes.
+    Returns number of bytes applied.
+    """
+    c = ciphertexts[cipher_index]
+    sb = snippet.encode(errors="ignore")
+    applied = 0
+    for pos in range(min(len(c), len(sb))):
+        kb = c[pos] ^ sb[pos]
+        if key[pos] is None or key[pos] == kb:
+            key[pos] = kb
+            applied += 1
+    return applied
 
 
 def refine_key_by_printability(
@@ -170,11 +258,52 @@ def decrypt_with_key(ciphertext: bytes, key: List[Optional[int]]) -> str:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Many-Time Pad solver")
+    parser.add_argument(
+        "--use-hints", action="store_true", help="Apply provided plaintext hints to anchor keystream"
+    )
+    parser.add_argument(
+        "--unsupervised", action="store_true", help="Force unsupervised mode (ignore hints)"
+    )
+    parser.add_argument(
+        "--hints-file", type=str, default=None,
+        help="Path to hints file containing lines like 'CT3: <plaintext prefix>'"
+    )
+    args = parser.parse_args()
+
     ciphertexts = bytes_from_hex_list(HEX_CIPHERTEXTS)
     target = ciphertexts[-1]
 
     space_evidence = compute_space_evidence(ciphertexts)
     key = derive_key_by_space_heuristic(ciphertexts, space_evidence, include_last_in_seed=False)
+
+    # Optional: apply correctness hints to anchor keystream positions (robust sliding and scoring)
+    if args.use_hints and not args.unsupervised:
+        applied = 0
+        # Load from file if provided
+        if args.hints_file:
+            try:
+                with open(args.hints_file, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        # Accept formats: CT1:, C1:, 1:, or 'Ciphertext #1'
+                        m = re.match(r"^(?:Ciphertext\s*#)?\s*CT?\s*([0-9]+)\s*:\s*(.*)$", line, re.IGNORECASE)
+                        if not m:
+                            continue
+                        idx = int(m.group(1))
+                        snippet = m.group(2)
+                        if 1 <= idx <= len(ciphertexts) - 1 and snippet:
+                            if try_apply_snippet(ciphertexts, key, idx - 1, snippet):
+                                applied += 1
+            except FileNotFoundError:
+                pass
+        # Fallback to built-in hints if nothing applied
+        if applied == 0:
+            for idx, snippet in HINTS:
+                if 1 <= idx <= len(ciphertexts) - 1 and snippet:
+                    try_apply_snippet(ciphertexts, key, idx - 1, snippet)
 
     # Refine unknown key positions purely via printability across all ciphertexts
     evidence_threshold = max(2, (len(ciphertexts) - 1) // 2)
