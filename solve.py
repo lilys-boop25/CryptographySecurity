@@ -143,6 +143,11 @@ def main() -> None:
     # Refine unknown key positions purely via printability across all ciphertexts
     refine_key_by_printability(ciphertexts, key, min_printable_ratio=0.8)
 
+    # Decrypt and print plaintexts for ciphertexts #1..#10
+    for idx, c in enumerate(ciphertexts[:-1], start=1):
+        pi = decrypt_with_key(c, key)
+        print(f"Ciphertext #{idx} plaintext: {pi}")
+
     # Decrypt target and print/write
     plaintext = decrypt_with_key(target, key)
     print(plaintext)
