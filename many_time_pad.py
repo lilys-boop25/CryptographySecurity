@@ -1,11 +1,9 @@
-#!/usr/bin/env python3
 from __future__ import annotations
 
 from typing import List, Optional, Iterable
 
-# Hex-encoded ciphertexts (11 total; last one is the target)
+# Eleven hex-encoded ciphertexts; the last one is the target to decrypt
 HEX_CIPHERTEXTS: List[str] = [
-    # 1..10
     "315c4eeaa8b5f8aaf9174145bf43e1784b8fa00dc71d885a804e5ee9fa40b16349c146fb778cdf2d3aff021dfff5b403b510d0d0455468aeb98622b137dae857553ccd8883a7bc37520e06e515d22c954eba5025b8cc57ee59418ce7dc6bc41556bdb36bbca3e8774301fbcaa3b83b220809560987815f65286764703de0f3d524400a19b159610b11ef3e",
     "234c02ecbbfbafa3ed18510abd11fa724fcda2018a1a8342cf064bbde548b12b07df44ba7191d9606ef4081ffde5ad46a5069d9f7f543bedb9c861bf29c7e205132eda9382b0bc2c5c4b45f919cf3a9f1cb74151f6d551f4480c82b2cb24cc5b028aa76eb7b4ab24171ab3cdadb8356f",
     "32510ba9a7b2bba9b8005d43a304b5714cc0bb0c8a34884dd91304b8ad40b62b07df44ba6e9d8a2368e51d04e0e7b207b70b9b8261112bacb6c866a232dfe257527dc29398f5f3251a0d47e503c66e935de81230b59b7afb5f41afa8d661cb",
@@ -16,16 +14,14 @@ HEX_CIPHERTEXTS: List[str] = [
     "315c4eeaa8b5f8bffd11155ea506b56041c6a00c8a08854dd21a4bbde54ce56801d943ba708b8a3574f40c00fff9e00fa1439fd0654327a3bfc860b92f89ee04132ecb9298f5fd2d5e4b45e40ecc3b9d59e9417df7c95bba410e9aa2ca24c5474da2f276baa3ac325918b2daada43d6712150441c2e04f6565517f317da9d3",
     "271946f9bbb2aeadec111841a81abc300ecaa01bd8069d5cc91005e9fe4aad6e04d513e96d99de2569bc5e50eeeca709b50a8a987f4264edb6896fb537d0a716132ddc938fb0f836480e06ed0fcd6e9759f40462f9cf57f4564186a2c1778f1543efa270bda5e933421cbe88a4a52222190f471e9bd15f652b653b7071aec59a2705081ffe72651d08f822c9ed6d76e48b63ab15d0208573a7eef027",
     "466d06ece998b7a2fb1d464fed2ced7641ddaa3cc31c9941cf110abbf409ed39598005b3399ccfafb61d0315fca0a314be138a9f32503bedac8067f03adbf3575c3b8edc9ba7f537530541ab0f9f3cd04ff50d66f1d559ba520e89a2cb2a83",
-    # target (11)
     "32510ba9babebbbefd001547a810e67149caee11d945cd7fc81a05e9f85aac650e9052ba6a8cd8257bf14d13e6f0a803b54fde9e77472dbff89d71b57bddef121336cb85ccb8f3315f4b52e301d16e9f52f904",
 ]
 
-CRIB: bytes = (
-    b"The secret message is: When using a stream cipher, never use the key more than once"
-)
-
 ALPHA_SET = set(range(ord("A"), ord("Z") + 1)) | set(range(ord("a"), ord("z") + 1))
+DIGIT_SET = set(range(ord('0'), ord('9') + 1))
 PRINTABLE_SET = set(range(32, 127))
+COMMON_PUNCT = set(map(ord, list(" ,.;:'\"!?()-/[]{}&_")))
+RARE_PUNCT = set(map(ord, list("~`^|\\<>")))
 
 
 def bytes_from_hex_list(hex_list: Iterable[str]) -> List[bytes]:
@@ -52,8 +48,6 @@ def derive_key_by_space_heuristic(
 ) -> List[Optional[int]]:
     max_length = max(len(c) for c in ciphertexts)
     key: List[Optional[int]] = [None] * max_length
-    # Majority threshold across pairwise comparisons
-    # With M ciphertexts, each position gets up to (M-1) counts.
     threshold = max(2, (len(ciphertexts) - 1) // 2)
 
     last_index = len(ciphertexts) - 1
@@ -63,22 +57,104 @@ def derive_key_by_space_heuristic(
         length = len(ciphertexts[ci])
         for position in range(length):
             if space_evidence[ci][position] >= threshold:
-                candidate_key_byte = ciphertexts[ci][position] ^ 0x20  # XOR with space
+                candidate_key_byte = ciphertexts[ci][position] ^ 0x20
                 if key[position] is None:
                     key[position] = candidate_key_byte
                 elif key[position] != candidate_key_byte:
-                    key[position] = None  # conflict => leave unknown
+                    key[position] = None
     return key
 
 
-def apply_crib_to_cipher(
-    key: List[Optional[int]], ciphertext: bytes, crib: bytes, start_offset: int = 0
+def refine_key_by_printability(
+    ciphertexts: List[bytes],
+    key: List[Optional[int]],
+    space_evidence: List[List[int]],
+    evidence_threshold: int,
+    min_printable_ratio: float = 0.8,
+    max_passes: int = 2,
 ) -> None:
-    for idx, crib_byte in enumerate(crib):
-        position = start_offset + idx
-        if position >= len(ciphertext):
+    """For positions where the key is unknown, choose the key byte that
+    maximizes printable ASCII across all ciphertexts. This does not use any
+    known plaintext. Keys failing the printable ratio threshold are left unknown.
+    """
+    max_len = max(len(c) for c in ciphertexts)
+    for _ in range(max_passes):
+        changed = False
+        for position in range(max_len):
+            if key[position] is not None:
+                continue
+            best_score = -1e9
+            best_key_byte: Optional[int] = None
+            # Evaluate all candidates
+            for candidate in range(256):
+                printable_hits = 0
+                letter_hits = 0
+                digit_hits = 0
+                space_hits = 0
+                common_punct_hits = 0
+                rare_punct_hits = 0
+                total = 0
+                evidence_bonus = 0.0
+                for i, c in enumerate(ciphertexts):
+                    if position >= len(c):
+                        continue
+                    total += 1
+                    ptb = c[position] ^ candidate
+                    # space evidence shaping
+                    if space_evidence[i][position] >= evidence_threshold:
+                        if ptb == 0x20:
+                            evidence_bonus += 0.35
+                        else:
+                            evidence_bonus -= 0.20
+                    if ptb in PRINTABLE_SET:
+                        printable_hits += 1
+                        if ptb in ALPHA_SET:
+                            letter_hits += 1
+                        elif ptb in DIGIT_SET:
+                            digit_hits += 1
+                        elif ptb == 0x20:
+                            space_hits += 1
+                        elif ptb in COMMON_PUNCT:
+                            common_punct_hits += 1
+                        elif ptb in RARE_PUNCT:
+                            rare_punct_hits += 1
+                if total == 0:
+                    continue
+                printable_ratio = printable_hits / float(total)
+                letter_ratio = letter_hits / float(total)
+                digit_ratio = digit_hits / float(total)
+                space_ratio = space_hits / float(total)
+                common_punct_ratio = common_punct_hits / float(total)
+                rare_punct_ratio = rare_punct_hits / float(total)
+
+                score = (
+                    7.0 * printable_ratio +
+                    2.2 * letter_ratio +
+                    0.8 * space_ratio +
+                    0.6 * digit_ratio +
+                    0.5 * common_punct_ratio -
+                    1.2 * rare_punct_ratio +
+                    evidence_bonus
+                )
+                if score > best_score:
+                    best_score = score
+                    best_key_byte = candidate
+
+            if best_key_byte is not None:
+                # Enforce printable threshold for the selected candidate
+                total = 0
+                printable_hits = 0
+                for c in ciphertexts:
+                    if position >= len(c):
+                        continue
+                    total += 1
+                    if (c[position] ^ best_key_byte) in PRINTABLE_SET:
+                        printable_hits += 1
+                if total > 0 and (printable_hits / float(total)) >= min_printable_ratio:
+                    key[position] = best_key_byte
+                    changed = True
+        if not changed:
             break
-        key[position] = ciphertext[position] ^ crib_byte
 
 
 def decrypt_with_key(ciphertext: bytes, key: List[Optional[int]]) -> str:
@@ -92,42 +168,29 @@ def decrypt_with_key(ciphertext: bytes, key: List[Optional[int]]) -> str:
     return "".join(plaintext_chars)
 
 
-def score_printable_ratio(ciphertext: bytes, key: List[Optional[int]], upto: Optional[int] = None) -> float:
-    length = len(ciphertext) if upto is None else min(len(ciphertext), upto)
-    if length == 0:
-        return 1.0
-    ok = 0
-    for position in range(length):
-        key_byte = key[position]
-        if key_byte is None:
-            continue
-        decrypted_byte = ciphertext[position] ^ key_byte
-        if decrypted_byte in PRINTABLE_SET:
-            ok += 1
-    return ok / float(length)
-
-
 def main() -> None:
     ciphertexts = bytes_from_hex_list(HEX_CIPHERTEXTS)
-    target_index = len(ciphertexts) - 1
-    target = ciphertexts[target_index]
+    target = ciphertexts[-1]
 
     space_evidence = compute_space_evidence(ciphertexts)
     key = derive_key_by_space_heuristic(ciphertexts, space_evidence, include_last_in_seed=False)
 
-    # Known canonical crib starts at offset 0 for this dataset
-    apply_crib_to_cipher(key, target, CRIB, start_offset=0)
+    # Refine unknown key positions purely via printability across all ciphertexts
+    evidence_threshold = max(2, (len(ciphertexts) - 1) // 2)
+    refine_key_by_printability(
+        ciphertexts, key, space_evidence, evidence_threshold, min_printable_ratio=0.85, max_passes=3
+    )
 
-    # Print validation: printable ratios for first len(CRIB) bytes
-    crib_length = min(len(CRIB), len(target))
+    # Decrypt and print plaintexts for ciphertexts #1..#10
     for idx, c in enumerate(ciphertexts[:-1], start=1):
-        ratio = score_printable_ratio(c, key, upto=crib_length)
-        print(f"Ciphertext #{idx:02d} printable ratio over crib-span: {ratio:.2f}")
+        pi = decrypt_with_key(c, key)
+        print(f"Ciphertext #{idx} plaintext: {pi}")
 
-    # Decrypt target and print
-    target_plaintext = decrypt_with_key(target, key)
-    print("\nDecrypted target:")
-    print(target_plaintext)
+    # Decrypt target and print/write
+    plaintext = decrypt_with_key(target, key)
+    print(plaintext)
+    with open("secret.txt", "w", encoding="utf-8") as f:
+        f.write(plaintext + "\n")
 
 
 if __name__ == "__main__":
