@@ -83,7 +83,7 @@ def derive_key_by_space_heuristic(
 
 
 def try_apply_snippet(
-    ciphertexts: List[bytes], key: List[Optional[int]], cipher_index: int, snippet: str
+    ciphertexts: List[bytes], key: List[Optional[int]], cipher_index: int, snippet: str, *, min_ratio: float = 0.9
 ) -> bool:
     """Slide the snippet over ciphertext[cipher_index] to find the offset that yields
     the most printable plaintext across all ciphertexts; apply resulting key bytes.
@@ -130,7 +130,7 @@ def try_apply_snippet(
             best_offset = start
             best_kbytes = candidate_pairs
     # Apply if strong enough
-    if best_offset is not None and best_score >= 0.9 and best_kbytes:
+    if best_offset is not None and best_score >= min_ratio and best_kbytes:
         for pos, kb in best_kbytes:
             key[pos] = kb
         return True
@@ -257,6 +257,24 @@ def decrypt_with_key(ciphertext: bytes, key: List[Optional[int]]) -> str:
     return "".join(plaintext_chars)
 
 
+def refine_key_by_common_words(
+    ciphertexts: List[bytes], key: List[Optional[int]], words: List[str], passes: int = 2
+) -> None:
+    """Apply a set of generic English cribs (short common words/phrases) across
+    all non-target ciphertexts to reveal more keystream, without using
+    any message-specific hints.
+    """
+    non_target_indices = list(range(0, len(ciphertexts) - 1))
+    for _ in range(passes):
+        changed = False
+        for ci in non_target_indices:
+            for w in words:
+                if try_apply_snippet(ciphertexts, key, ci, w, min_ratio=0.8):
+                    changed = True
+        if not changed:
+            break
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Many-Time Pad solver")
     parser.add_argument(
@@ -305,10 +323,20 @@ def main() -> None:
                 if 1 <= idx <= len(ciphertexts) - 1 and snippet:
                     try_apply_snippet(ciphertexts, key, idx - 1, snippet)
 
+    # Unsupervised: generic common-word crib dragging across non-target ct
+    common_words = [
+        " the ", "The ", "There ", "You ", "We ",
+        " of ", " and ", " in ", " to ", " that ", " is ",
+        "cipher", "crypto", "ciphertext", "encryption", "algorithm",
+        " number ", " computers", " Government",
+        " types of ", " keep ", " secrets ",
+    ]
+    refine_key_by_common_words(ciphertexts, key, common_words, passes=3)
+
     # Refine unknown key positions purely via printability across all ciphertexts
     evidence_threshold = max(2, (len(ciphertexts) - 1) // 2)
     refine_key_by_printability(
-        ciphertexts, key, space_evidence, evidence_threshold, min_printable_ratio=0.85, max_passes=3
+        ciphertexts, key, space_evidence, evidence_threshold, min_printable_ratio=0.9, max_passes=6
     )
 
     # Decrypt and print plaintexts for ciphertexts #1..#10
