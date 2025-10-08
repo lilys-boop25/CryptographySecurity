@@ -1,4 +1,4 @@
-#Approach Explanation
+*Approach Explanation
 
 This solution exploits the fundamental weakness of reusing a one-time pad key: when the same key encrypts multiple plaintexts, XORing two ciphertexts together cancels out the key, leaving only the XOR of the two plaintexts.
 
