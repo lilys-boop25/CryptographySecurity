@@ -6,6 +6,7 @@ This solution exploits the fundamental weakness of reusing a one-time pad key: w
 | 1. XOR ciphertexts | Remove key, create `Pi ⊕ Pj` | Detect patterns between plaintexts |
 | 2. Count alphabetic results | Identify probable space positions | Exploit property `space ⊕ [a-zA-Z] = [a-zA-Z]` |
 | 3. Derive key from spaces | `K[pos] = C[pos] ⊕ 0x20` | Recover key bytes at space positions |
+
 ##Key Techniques:
 
 - Space Detection: When space (0x20) XORs with alphabetic characters, it flips the case bit, producing another letter. High frequency of alphabetic XOR results indicates a space position.
