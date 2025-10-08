@@ -1,22 +1,15 @@
-# Many-Time Pad Solver
+#Approach Explanation
+This solution exploits the fundamental weakness of reusing a one-time pad key: when the same key encrypts multiple plaintexts, XORing two ciphertexts together cancels out the key, leaving only the XOR of the two plaintexts.
+##Core Attack Strategy:
+| Step | Method | Purpose |
+|------|--------|---------|
+| 1. XOR ciphertexts | Remove key, create `Pi ⊕ Pj` | Detect patterns between plaintexts |
+| 2. Count alphabetic results | Identify probable space positions | Exploit property `space ⊕ [a-zA-Z] = [a-zA-Z]` |
+| 3. Derive key from spaces | `K[pos] = C[pos] ⊕ 0x20` | Recover key bytes at space positions |
+##Key Techniques:
 
-This solver recovers the plaintext of the last ciphertext when the same one-time pad keystream is mistakenly reused across multiple messages.
+- Space Detection: When space (0x20) XORs with alphabetic characters, it flips the case bit, producing another letter. High frequency of alphabetic XOR results indicates a space position.
+- Printability Scoring: For unknown key positions, the algorithm tests all 256 candidates and assigns scores based on: printable ratio (×7.0), letter ratio (×2.2), space ratio (×0.8), common punctuation (×0.5), and penalties for rare characters (×-1.2).
+- Manual Hints: Supports human intervention through MANUAL_HINTS list, allowing strategic key recovery when automated methods fall short.
 
-## Approach
-1. Root flaw: reusing the key in OTP/stream ciphers.
-If the same key is used more than once, XORing two ciphertexts cancels the key and yields P1 ⊕ P2. That is the fundamental vulnerability this approach exploits.
-We exploit that XORing two ciphertexts produced with the same keystream cancels the keystream and yields the XOR of the two plaintexts. When one plaintext contains a space (0x20) and the other an ASCII letter, the XOR is typically alphabetic. Counting these events across all pairs gives “space evidence” per position for each ciphertext. Where evidence is strong, we infer the keystream byte as C ⊕ 0x20.
-
-For positions with unknown keystream, we avoid any crib and instead search over all 256 key byte candidates and score them by how well the resulting plaintext bytes look like English across all ciphertexts. The score emphasizes printable ASCII, letters, spaces, and common punctuation, penalizes rare punctuation, and incorporates the space-evidence as a soft prior. We iterate this refinement a few passes until convergence. This produces high-quality plaintexts for ciphertexts #1–#10 and the target.
-
-Finally, we decrypt all ciphertexts with the derived keystream and print them; the target plaintext is also saved to `secret.txt`.
-
-## Files
-- `solve.py`: Main solver. Prints plaintext and writes `secret.txt`.
-- `secret.txt`: Output containing the recovered plaintext of the last ciphertext.
-
-## Usage
-```
-python3 solve.py
-```
-This prints the secret message and writes it to `secret.txt`.
+The approach successfully recovers the target plaintext without the original key, demonstrating why key reuse catastrophically breaks stream cipher security.
