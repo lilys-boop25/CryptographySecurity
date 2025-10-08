@@ -1,6 +1,9 @@
 #Approach Explanation
+
 This solution exploits the fundamental weakness of reusing a one-time pad key: when the same key encrypts multiple plaintexts, XORing two ciphertexts together cancels out the key, leaving only the XOR of the two plaintexts.
+
 ##Core Attack Strategy:
+
 | Step | Method | Purpose |
 |------|--------|---------|
 | 1. XOR ciphertexts | Remove key, create `Pi ⊕ Pj` | Detect patterns between plaintexts |
